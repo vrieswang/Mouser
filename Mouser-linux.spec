@@ -106,6 +106,10 @@ a = Analysis(
             os.path.join(ROOT, "packaging", "linux", "icons"),
             os.path.join("linux", "icons"),
         ),
+        (
+            os.path.join(ROOT, "packaging", "linux", "gnome-focus-watcher"),
+            os.path.join("linux", "gnome-focus-watcher"),
+        ),
         (BUILD_INFO_DATA, "."),
     ],
     hiddenimports=[

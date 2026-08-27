@@ -360,14 +360,29 @@ elif sys.platform == "darwin":
 elif sys.platform == "linux":
     import subprocess as _subprocess
 
+    import core.gnome_focus as _gnome_focus
+
     _WAYLAND = os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
     _KDE = "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
+    _GNOME = "GNOME" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
 
     def _pid_to_exe(pid: int) -> str | None:
         try:
             return os.readlink(f"/proc/{pid}/exe")
         except OSError:
             return None
+
+    def _get_foreground_gnome_watcher() -> str | None:
+        """GNOME: use the Mouser focus-watcher extension via D-Bus.
+
+        The extension (shipped in packaging/linux/gnome-focus-watcher/) is the
+        only way to see the focused window on GNOME/Wayland. Only attempted when
+        the desktop is GNOME and the shell version is supported, since the
+        extension simply does not exist on other setups.
+        """
+        if not _GNOME or not _gnome_focus.gnome_focus_watcher_supported():
+            return None
+        return _gnome_focus.focus_app_executable()
 
     def _get_foreground_xdotool() -> str | None:
         """X11: use xdotool."""
@@ -406,7 +421,11 @@ elif sys.platform == "linux":
                 # kdotool is unavailable or cannot resolve the active window.
                 exe = _get_foreground_xdotool()
                 return _single_identity(exe)
-            # GNOME / other Wayland compositors: not yet supported
+            if _GNOME:
+                # GNOME Wayland: use the Mouser focus-watcher extension.
+                exe = _get_foreground_gnome_watcher()
+                return _single_identity(exe)
+            # Other Wayland compositors: not yet supported
             return ()
         exe = _get_foreground_xdotool()
         return _single_identity(exe)

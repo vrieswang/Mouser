@@ -61,6 +61,40 @@ class AppDetectorLinuxTests(unittest.TestCase):
             self.assertEqual(module.get_foreground_app_identity(), ())
             xdotool.assert_not_called()
 
+    def test_gnome_wayland_uses_focus_watcher_extension(self):
+        module = self._reload_for_linux("wayland", "GNOME")
+
+        with (
+            patch.object(
+                module, "_get_foreground_gnome_watcher", return_value="/usr/bin/firefox"
+            ),
+            patch.object(module, "_get_foreground_xdotool", return_value="/tmp/x11") as xdotool,
+        ):
+            self.assertEqual(
+                module.get_foreground_app_identity(), ("/usr/bin/firefox",)
+            )
+            xdotool.assert_not_called()
+
+    def test_gnome_wayland_falls_back_when_extension_unavailable(self):
+        module = self._reload_for_linux("wayland", "GNOME")
+
+        with (
+            patch.object(module, "_get_foreground_gnome_watcher", return_value=None),
+            patch.object(module, "_get_foreground_xdotool", return_value="/tmp/x11") as xdotool,
+        ):
+            self.assertEqual(module.get_foreground_app_identity(), ())
+            xdotool.assert_not_called()
+
+    def test_gnome_x11_keeps_using_xdotool(self):
+        module = self._reload_for_linux("x11", "GNOME")
+
+        with (
+            patch.object(module, "_get_foreground_xdotool", return_value="/tmp/x11-app") as xdotool,
+            patch.object(module, "_get_foreground_gnome_watcher") as gnome_watcher,
+        ):
+            self.assertEqual(module.get_foreground_app_identity(), ("/tmp/x11-app",))
+            gnome_watcher.assert_not_called()
+
     def test_x11_uses_xdotool(self):
         module = self._reload_for_linux("x11", "KDE")
 
