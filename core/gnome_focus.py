@@ -10,7 +10,8 @@ and the foreground-app detector (``core/app_detector.py``):
 * desktop / shell-version gating (the extension only targets GNOME 45+),
 * locating and installing the extension into the user's GNOME Shell dir,
 * enabling it, and
-* querying the focused window over D-Bus.
+* querying the focused window (and listening for focus changes) over D-Bus,
+  via **dbus-fast** (no external ``gdbus`` subprocess).
 
 Every function is safe to call on any platform; the active ones no-op (or
 return ``False``/``None``) when not running on a supported GNOME desktop.
@@ -18,6 +19,7 @@ return ``False``/``None``) when not running on a supported GNOME desktop.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -45,6 +47,25 @@ DBUS_SERVICE = "org.gnome.Shell"
 DBUS_PATH = "/github/mouser"
 DBUS_INTERFACE = "org.mouser.FocusWatcher"
 DBUS_METHOD = "GetFocusApp"
+DBUS_SIGNAL = "FocusChanged"
+
+# Introspection data matching the interface exported by the bundled extension
+# (packaging/linux/gnome-focus-watcher/extension.js). Used by dbus-fast's
+# high-level proxy client: it drives both the GetFocusApp method call and the
+# FocusChanged signal subscription.
+WATCHER_INTROSPECTION = """<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<node>
+  <interface name="org.mouser.FocusWatcher">
+    <method name="GetFocusApp">
+      <arg type="s" direction="out" name="window" />
+    </method>
+    <signal name="FocusChanged">
+      <arg type="s" name="window" />
+    </signal>
+  </interface>
+</node>
+"""
 
 
 def is_gnome_desktop(environ: Mapping[str, str] | None = None) -> bool:
@@ -146,64 +167,85 @@ def extension_active() -> bool:
     return payload is not None
 
 
+async def _connect_watcher_bus():
+    """Open a dbus-fast session-bus connection to the Mouser extension.
+
+    Returns a connected ``dbus_fast.aio.MessageBus``, or raises on failure
+    (dbus-fast missing, session bus unreachable, etc). The caller owns the
+    returned bus and must disconnect it when done.
+    """
+    from dbus_fast.aio import MessageBus
+    from dbus_fast import BusType
+
+    return await MessageBus(bus_type=BusType.SESSION).connect()
+
+
+async def _get_focus_app_payload_from_bus(bus) -> dict | None:
+    """Call ``GetFocusApp`` on an already-connected watcher bus.
+
+    Returns the parsed payload dict, or ``None`` when the method fails or the
+    reply is not a JSON object.
+    """
+    from dbus_fast import Message, MessageType
+
+    reply = await bus.call(
+        Message(
+            destination=DBUS_SERVICE,
+            path=DBUS_PATH,
+            interface=DBUS_INTERFACE,
+            member=DBUS_METHOD,
+        )
+    )
+    if reply.message_type != MessageType.METHOD_RETURN or not reply.body:
+        return None
+    payload = reply.body[0]
+    if not isinstance(payload, str):
+        return None
+    try:
+        parsed = json.loads(payload)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def get_focus_app_payload(environ: Mapping[str, str] | None = None) -> dict | None:
     """Query the extension's D-Bus ``GetFocusApp`` method and return the parsed
     payload dict (with keys like ``executable``, ``wm_class``, ``title``), or
-    ``None`` if the service/method is unavailable."""
+    ``None`` if the service/method is unavailable.
+
+    Uses dbus-fast (not gdbus) under the hood. Runs a short-lived session bus
+    connection per call, which is fine for occasional use (extension status
+    refresh, polling fallback).
+    """
     env = environ if environ is not None else os.environ
     if sys.platform != "linux":
         return None
     if not is_gnome_desktop(env):
         return None
-    gdbus = shutil.which("gdbus")
-    if not gdbus:
-        return None
-    code, out, _err = _run(
-        [
-            gdbus, "call", "--session",
-            "--dest", DBUS_SERVICE,
-            "--object-path", DBUS_PATH,
-            "--method", f"{DBUS_INTERFACE}.{DBUS_METHOD}",
-        ],
-        timeout=3,
-    )
-    if code != 0 or not out.strip():
-        return None
-    # gdbus prints "( <json-string> )" — the payload is a single string arg.
-    parsed = _parse_gdbus_string_reply(out)
-    if parsed is None:
-        return None
-    if isinstance(parsed, dict):
-        return parsed
-    return None
-
-
-def _parse_gdbus_string_reply(reply: str) -> object:
-    """Extract a JSON object from a ``gdbus call`` string reply.
-
-    ``gdbus call`` prints e.g. ``('{"id": 1, ...}',)`` for a single string
-    argument. We strip that wrapping and parse the embedded JSON.
-    """
-    text = reply.strip()
-    if not text:
-        return None
-    # Slice off the outer () and unwrap the quoted string.
-    if text.startswith("(") and text.rstrip().endswith(")"):
-        inner = text[1 : text.rstrip().rfind(")")]
-        # inner may still have a trailing comma before the ')'.
-        inner = inner.strip()
-        if inner.endswith(","):
-            inner = inner[:-1].strip()
-    else:
-        inner = text
-    # Unquote a single quoted string.
-    if len(inner) >= 2 and inner[0] == "'" and inner[-1] == "'":
-        inner = inner[1:-1]
-    elif len(inner) >= 2 and inner[0] == '"' and inner[-1] == '"':
-        inner = inner[1:-1]
     try:
-        return json.loads(inner)
-    except (ValueError, TypeError):
+        from dbus_fast.aio import MessageBus
+        from dbus_fast import BusType
+    except ImportError:
+        return None
+
+    async def _query():
+        try:
+            bus = await _connect_watcher_bus()
+        except Exception:
+            return None
+        try:
+            return await _get_focus_app_payload_from_bus(bus)
+        except Exception:
+            return None
+        finally:
+            try:
+                bus.disconnect()
+            except Exception:
+                pass
+
+    try:
+        return asyncio.run(_query())
+    except Exception:
         return None
 
 

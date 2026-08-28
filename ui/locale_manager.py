@@ -4,7 +4,7 @@ Supports English (en), Simplified Chinese (zh_CN), and Traditional Chinese (zh_T
 Exposed to QML as the context property `lm`.
 """
 
-from PySide6.QtCore import QObject, Property, Signal, Slot
+from PySide6.QtCore import QObject, Property, Signal, Slot  # pyright: ignore[reportMissingImports]
 
 _TRANSLATIONS = {
     "en": {
@@ -107,6 +107,7 @@ _TRANSLATIONS = {
         # Mouse page — debug panel
         "mouse.debug_events": "Debug Events",
         "mouse.debug_events_desc": "Collects detected buttons, gestures, and mapped actions",
+        "mouse.debug_active_profile": "Active profile",
         "mouse.clear": "Clear",
         "mouse.clear_rec": "Clear Rec",
         "mouse.on": "On",
@@ -390,6 +391,7 @@ _TRANSLATIONS = {
 
         "mouse.debug_events": "\u8c03\u8bd5\u4e8b\u4ef6",
         "mouse.debug_events_desc": "\u6536\u96c6\u68c0\u6d4b\u5230\u7684\u6309\u952e\u3001\u624b\u52bf\u548c\u6620\u5c04\u52a8\u4f5c",
+        "mouse.debug_active_profile": "\u5f53\u524d\u914d\u7f6e\u6587\u4ef6",
         "mouse.clear": "\u6e05\u9664",
         "mouse.clear_rec": "\u6e05\u9664\u5f55\u5236",
         "mouse.on": "\u5f00",
@@ -663,6 +665,7 @@ _TRANSLATIONS = {
 
         "mouse.debug_events": "\u9664\u932f\u4e8b\u4ef6",
         "mouse.debug_events_desc": "\u6536\u96c6\u5075\u6e2c\u5230\u7684\u6309\u9375\u3001\u624b\u52e2\u548c\u5c0d\u6620\u52d5\u4f5c",
+        "mouse.debug_active_profile": "\u76ee\u524d\u4f7f\u7528\u4e2d\u7684\u8a2d\u5b9a\u6a94",
         "mouse.clear": "\u6e05\u9664",
         "mouse.clear_rec": "\u6e05\u9664\u9304\u88fd",
         "mouse.on": "\u958b",
@@ -1119,14 +1122,14 @@ class LocaleManager(QObject):
         self.languageChanged.emit()
 
     # ── strings map (QVariantMap) ─────────────────────────────────
-    @Property("QVariantMap", notify=languageChanged)
+    @Property("QVariantMap", notify=languageChanged)  # pyright: ignore[reportArgumentType]
     def strings(self) -> dict:
         """Return the full translation dictionary for the active language."""
         return self._strings
 
     # ── helper slot usable from Python ───────────────────────────
     @Slot(str, result=str)
-    def tr(self, key: str) -> str:
+    def tr(self, key: str) -> str:  # pyright: ignore[reportIncompatibleMethodOverride]
         return self._strings.get(key, key)
 
     # ── button / action / category translation slots for QML ─────

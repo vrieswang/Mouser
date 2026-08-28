@@ -18,6 +18,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from build_support import should_keep_linux_qt_asset
+from PyInstaller.utils.hooks import collect_submodules
 
 BUILD_INFO_PATH = os.path.join(ROOT, "build", "mouser_build_info.json")
 
@@ -124,6 +125,9 @@ a = Analysis(
         "PySide6.QtNetwork",
         "PySide6.QtOpenGL",
         "PySide6.QtSvg",
+        # dbus-fast is imported lazily (core/gnome_focus.py) so static analysis
+        # misses it; pull in every submodule explicitly.
+        *collect_submodules("dbus_fast"),
     ],
     hookspath=[],
     hooksconfig={},

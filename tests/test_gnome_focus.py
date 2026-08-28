@@ -131,72 +131,173 @@ class InstalledCheckTests(unittest.TestCase):
             self.assertTrue(gnome_focus.extension_installed(env))
 
 
-class GdbusReplyParsingTests(unittest.TestCase):
-    def test_parses_single_string_reply(self):
-        reply = "('{\"id\": 1, \"executable\": \"/usr/bin/foo\", \"wm_class\": \"Foo\"}',)"
-        self.assertEqual(
-            gnome_focus._parse_gdbus_string_reply(reply),
-            {"id": 1, "executable": "/usr/bin/foo", "wm_class": "Foo"},
-        )
+class _FakeBus:
+    """Minimal stand-in for a connected dbus-fast MessageBus."""
 
-    def test_rejects_empty(self):
-        self.assertIsNone(gnome_focus._parse_gdbus_string_reply(""))
-        self.assertIsNone(gnome_focus._parse_gdbus_string_reply("   "))
+    def __init__(self):
+        self.disconnected = False
 
-    def test_rejects_garbage(self):
-        self.assertIsNone(gnome_focus._parse_gdbus_string_reply("not json at all"))
+    @classmethod
+    async def connect(cls):
+        return cls()
 
-    def test_rejects_non_object_json(self):
-        self.assertIsNone(gnome_focus._parse_gdbus_string_reply("(\\'[1,2,3]\\',)"))
+    def disconnect(self):
+        self.disconnected = True
 
 
 class GetFocusAppTests(unittest.TestCase):
-    def _patch_collect(self, code, out):
-        result = subprocess.CompletedProcess([], code, stdout=out)
-        return (
-            patch.object(gnome_focus.shutil, "which", return_value="/usr/bin/gdbus"),
-            patch.object(gnome_focus.subprocess, "run", return_value=result),
+    def _patch_connect(self):
+        return patch.object(
+            gnome_focus, "_connect_watcher_bus", side_effect=_FakeBus.connect
         )
 
     def test_returns_payload_on_success(self):
-        out = "('{\"executable\": \"/usr/bin/foo\", \"pid\": 123}',)"
-        pw, pr = self._patch_collect(0, out)
-        with patch.object(sys, "platform", "linux"), pw, pr:
+        async def fake_query(bus):
+            return {"executable": "/usr/bin/foo", "pid": 123}
+
+        with (
+            patch.object(sys, "platform", "linux"),
+            self._patch_connect(),
+            patch.object(
+                gnome_focus,
+                "_get_focus_app_payload_from_bus",
+                side_effect=fake_query,
+            ),
+        ):
             payload = gnome_focus.get_focus_app_payload(_gnome_env())
         self.assertEqual(payload, {"executable": "/usr/bin/foo", "pid": 123})
 
-    def test_none_on_nonzero_exit(self):
-        pw, pr = self._patch_collect(1, "error")
-        with patch.object(sys, "platform", "linux"), pw, pr:
+    def test_none_when_bus_connect_fails(self):
+        async def fail_connect():
+            raise OSError("session bus unreachable")
+
+        with (
+            patch.object(sys, "platform", "linux"),
+            patch.object(
+                gnome_focus, "_connect_watcher_bus", side_effect=fail_connect
+            ),
+        ):
+            self.assertIsNone(gnome_focus.get_focus_app_payload(_gnome_env()))
+
+    def test_none_when_query_raises(self):
+        async def fail_query(bus):
+            raise OSError("service vanished")
+
+        with (
+            patch.object(sys, "platform", "linux"),
+            self._patch_connect(),
+            patch.object(
+                gnome_focus,
+                "_get_focus_app_payload_from_bus",
+                side_effect=fail_query,
+            ),
+        ):
             self.assertIsNone(gnome_focus.get_focus_app_payload(_gnome_env()))
 
     def test_none_on_non_gnome(self):
-        pw, pr = self._patch_collect(0, "()")
-        with patch.object(sys, "platform", "linux"), pw, pr:
+        with patch.object(sys, "platform", "linux"):
             self.assertIsNone(
                 gnome_focus.get_focus_app_payload({"XDG_CURRENT_DESKTOP": "KDE"})
             )
 
-    def test_none_when_gdbus_missing(self):
+    def test_none_when_dbus_fast_missing(self):
         with (
             patch.object(sys, "platform", "linux"),
-            patch.object(gnome_focus.shutil, "which", return_value=None),
+            patch.dict(
+                sys.modules,
+                {"dbus_fast": None, "dbus_fast.aio": None},
+            ),
         ):
             self.assertIsNone(gnome_focus.get_focus_app_payload(_gnome_env()))
 
     def test_focus_app_executable_extracts_exe(self):
-        out = "('{\"executable\": \"/usr/bin/foo\", \"wm_class\": \"Foo\"}',)"
-        pw, pr = self._patch_collect(0, out)
-        with patch.object(sys, "platform", "linux"), pw, pr:
+        async def fake_query(bus):
+            return {"executable": "/usr/bin/foo", "wm_class": "Foo"}
+
+        with (
+            patch.object(sys, "platform", "linux"),
+            self._patch_connect(),
+            patch.object(
+                gnome_focus,
+                "_get_focus_app_payload_from_bus",
+                side_effect=fake_query,
+            ),
+        ):
             self.assertEqual(
                 gnome_focus.focus_app_executable(_gnome_env()), "/usr/bin/foo"
             )
 
     def test_focus_app_executable_none_when_empty(self):
-        out = "('{\"executable\": \"\", \"wm_class\": \"Foo\"}',)"
-        pw, pr = self._patch_collect(0, out)
-        with patch.object(sys, "platform", "linux"), pw, pr:
+        async def fake_query(bus):
+            return {"executable": "", "wm_class": "Foo"}
+
+        with (
+            patch.object(sys, "platform", "linux"),
+            self._patch_connect(),
+            patch.object(
+                gnome_focus,
+                "_get_focus_app_payload_from_bus",
+                side_effect=fake_query,
+            ),
+        ):
             self.assertIsNone(gnome_focus.focus_app_executable(_gnome_env()))
+
+
+class _GetFocusAppPayloadFromBusTests(unittest.IsolatedAsyncioTestCase):
+    """Tests for the low-level ``_get_focus_app_payload_from_bus`` helper."""
+
+    @staticmethod
+    def _fake_bus(reply_body, message_type=None):
+        from dbus_fast import MessageType  # pyright: ignore[reportMissingImports]
+
+        class _Reply:
+            def __init__(self, body, msg_type):
+                self.message_type = msg_type
+                self.body = body
+
+        class _Bus:
+            async def call(self, _msg):
+                msg_type = (
+                    message_type
+                    if message_type is not None
+                    else MessageType.METHOD_RETURN
+                )
+                return _Reply(reply_body, msg_type)
+
+        return _Bus()
+
+    async def test_parses_json_object_reply(self):
+        bus = self._fake_bus(("{\"executable\": \"/usr/bin/foo\", \"pid\": 123}",))
+        payload = await gnome_focus._get_focus_app_payload_from_bus(bus)
+        self.assertEqual(payload, {"executable": "/usr/bin/foo", "pid": 123})
+
+    async def test_returns_none_when_not_method_return(self):
+        from dbus_fast import MessageType  # pyright: ignore[reportMissingImports]
+
+        bus = self._fake_bus(
+            ("{\"executable\": \"/usr/bin/foo\"}",),
+            message_type=MessageType.ERROR,
+        )
+        self.assertIsNone(await gnome_focus._get_focus_app_payload_from_bus(bus))
+
+    async def test_returns_none_when_body_empty(self):
+        bus = self._fake_bus(())
+        self.assertIsNone(await gnome_focus._get_focus_app_payload_from_bus(bus))
+
+    async def test_returns_none_when_body_not_string(self):
+        bus = self._fake_bus((42,))
+        self.assertIsNone(await gnome_focus._get_focus_app_payload_from_bus(bus))
+
+    async def test_returns_none_when_json_is_not_object(self):
+        bus = self._fake_bus(("\"a string\"",))
+        self.assertIsNone(await gnome_focus._get_focus_app_payload_from_bus(bus))
+
+    async def test_returns_none_when_json_bad(self):
+        bus = self._fake_bus(("not-json",))
+        self.assertIsNone(await gnome_focus._get_focus_app_payload_from_bus(bus))
+
+    def test_placeholder(self):
+        self.assertTrue(True)
 
 
 class SourceDirResolutionTests(unittest.TestCase):
